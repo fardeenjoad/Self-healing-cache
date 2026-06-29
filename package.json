@@ -1,0 +1,17 @@
+{
+  "name": "self-healing-cache",
+  "version": "0.1.0",
+  "description": "A distributed cache system with consistent hashing and TTL-based expiry (Phase 1)",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "harness": "tsx test/distribution-harness.ts"
+  },
+  "devDependencies": {
+    "fast-check": "^3.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
+  }
+}
