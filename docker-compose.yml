@@ -1,0 +1,45 @@
+version: "3.9"
+
+# Shared bridge network — all three nodes can reach each other by service name.
+# Inside this network, node-a is reachable as "node-a", node-b as "node-b", etc.
+# The Router maps "0.0.0.0" → "127.0.0.1" for local testing; for Docker
+# inter-node forwarding, PEER_<NODEID>_HOST env vars are provided here as
+# preparation for a future Router enhancement that reads them.
+networks:
+  cache-net:
+    driver: bridge
+
+services:
+  node-a:
+    build: .
+    environment:
+      - NODE_ID=node-a
+      # Peer host overrides for Docker inter-node TCP forwarding
+      - PEER_NODE_B_HOST=node-b
+      - PEER_NODE_C_HOST=node-c
+    ports:
+      - "7001:7001"
+    networks:
+      - cache-net
+
+  node-b:
+    build: .
+    environment:
+      - NODE_ID=node-b
+      - PEER_NODE_A_HOST=node-a
+      - PEER_NODE_C_HOST=node-c
+    ports:
+      - "7002:7002"
+    networks:
+      - cache-net
+
+  node-c:
+    build: .
+    environment:
+      - NODE_ID=node-c
+      - PEER_NODE_A_HOST=node-a
+      - PEER_NODE_B_HOST=node-b
+    ports:
+      - "7003:7003"
+    networks:
+      - cache-net
