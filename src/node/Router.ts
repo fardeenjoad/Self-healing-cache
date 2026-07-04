@@ -48,12 +48,22 @@ export class Router {
         }
 
         // Build a CacheClient for every remote peer (not for this node itself).
-        // Use 127.0.0.1 when host is "0.0.0.0" — that is a server bind address,
-        // not a routable client address.
+        //
+        // Host resolution priority (for connecting to peers, not binding):
+        //   1. PEER_<NODEID>_HOST env var — set by docker-compose for Docker
+        //      inter-node routing (e.g. PEER_NODE_B_HOST=node-b).
+        //   2. NodeInfo.host if it is a routable address (not the bind wildcard).
+        //   3. "127.0.0.1" — fallback for local / test environments.
+        //
+        // The env var name is derived from nodeId: "node-b" → "PEER_NODE_B_HOST"
+        // (upper-cased, hyphens replaced with underscores, wrapped in PEER_…_HOST).
         this.peers = new Map();
         for (const info of config) {
             if (info.nodeId !== localNodeId) {
-                const connectHost = info.host === "0.0.0.0" ? "127.0.0.1" : info.host;
+                const envKey = `PEER_${info.nodeId.toUpperCase().replace(/-/g, "_")}_HOST`;
+                const connectHost =
+                    process.env[envKey] ??
+                    (info.host !== "0.0.0.0" ? info.host : "127.0.0.1");
                 this.peers.set(info.nodeId, new CacheClient(connectHost, info.port));
             }
         }
