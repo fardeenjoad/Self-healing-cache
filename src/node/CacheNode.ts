@@ -32,7 +32,7 @@ export class CacheNode {
 
     constructor(nodeId: string, config: ClusterConfig) {
         // Look up this node's port from the provided config.
-        const nodeInfo = getNodeInfo(nodeId);
+        const nodeInfo = config.find((n) => n.nodeId === nodeId);
         if (!nodeInfo) {
             throw new Error(`Unknown nodeId: ${nodeId}`);
         }
