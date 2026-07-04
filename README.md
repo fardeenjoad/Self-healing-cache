@@ -92,10 +92,142 @@ npm run build   # TypeScript compile check
 
 ---
 
+## Phase 2 — Multi-Node TCP Cluster ✓ Complete
+
+### What was built
+
+Phase 2 adds a real distributed cluster on top of the Phase 1 foundation. Each cache node runs as its own OS process listening on a TCP port, implements coordinator-less routing using the Phase 1 `ConsistentHashRing`, and can forward requests to peer nodes transparently. The cluster is containerised with Docker Compose and includes a smoke-test script for end-to-end validation.
+
+New files added — Phase 1 source is completely unchanged:
+
+| File | Purpose |
+|------|---------|
+| `src/node/TcpServer.ts` | NDJSON-framed TCP server; buffers partial chunks, echoes correlation IDs, applies backpressure |
+| `src/node/Router.ts` | Coordinator-less routing: local execution or peer forwarding with 5-second timeout |
+| `src/node/CacheNode.ts` | Wires `KVStore`, `Router`, and `TcpServer` into one startable/stoppable unit |
+| `src/node/node-entry.ts` | Process entry point; reads `NODE_ID` env var, handles `SIGTERM`/`SIGINT` for graceful shutdown |
+| `src/client/CacheClient.ts` | TCP client with concurrent pending-requests Map keyed by UUID correlation ID |
+| `src/config/cluster.ts` | Static 3-node topology (`node-a:7001`, `node-b:7002`, `node-c:7003`) |
+| `Dockerfile` + `docker-compose.yml` | Three-container cluster on a shared bridge network |
+| `scripts/smoke-test.ts` | Live cluster E2E verifier |
+
+---
+
+### Wire protocol
+
+All messages are newline-delimited JSON (NDJSON) over raw TCP — one JSON object per line. The client assigns a UUID `id` to each request; the server echoes it back in the response so that concurrent in-flight requests can be matched to their promises without serialising calls.
+
+```
+→  {"command":"SET","key":"foo","value":"bar","id":"abc-123"}\n
+←  {"ok":true,"id":"abc-123"}\n
+
+→  {"command":"GET","key":"foo","id":"def-456"}\n
+←  {"ok":true,"value":"bar","id":"def-456"}\n
+
+→  {"command":"DEL","key":"foo","id":"ghi-789"}\n
+←  {"ok":true,"id":"ghi-789"}\n
+```
+
+---
+
+### Coordinator-less routing
+
+Every node in the cluster runs an identical `ConsistentHashRing` built from the same static `ClusterConfig`. Because the ring is deterministic, any node can receive any request and independently compute which node owns the key — no central coordinator is needed.
+
+```
+Client → node-a:  SET key="hello" value="world"
+  node-a: ring.getNode("hello") → "node-b"   ← not me
+  node-a: forward to node-b:7002 via CacheClient
+    node-b: ring.getNode("hello") → "node-b" ← me, execute locally
+    node-b: kvStore.set("hello", "world")
+    node-b: respond { ok: true }
+  node-a: proxy response back to client
+Client ← node-a:  { ok: true }
+```
+
+The client issued one request and received one response. The internal forwarding hop is invisible. Any of the three nodes can receive any command for any key — routing is always correct.
+
+Forwarding uses a lazy-connect pattern: peer `CacheClient` instances are created at startup but connected on first use and kept open. A 5-second timeout guard destroys the socket and evicts the peer from the connected set if the remote node does not respond, preventing indefinite hangs.
+
+---
+
+### Running the cluster
+
+**Prerequisites:** Docker and Docker Compose installed.
+
+```bash
+# Build images and start all three nodes
+docker compose up --build
+
+# In a separate terminal — run the smoke test against the live cluster
+npm run smoke
+```
+
+Expected smoke-test output:
+
+```
+[INFO] Connected to node-a on port 7001
+[INFO] Connected to node-b on port 7002
+[INFO] Connected to node-c on port 7003
+
+── SET ──
+[PASS] SET smoke:a:1 → node-a
+[PASS] SET smoke:a:2 → node-a
+...
+
+── GET (cross-node) ──
+[PASS] GET smoke:a:1 from node-b
+[PASS] GET smoke:a:2 from node-c
+...
+
+── DEL ──
+[PASS] DEL smoke:a:1 via node-b
+...
+
+All smoke tests passed. (27/27)
+```
+
+To start a single node locally (without Docker):
+
+```bash
+npm run build
+NODE_ID=node-a npm run node:start
+```
+
+---
+
+### Phase 2 test results
+
+```
+Test Files  4 passed (4)
+Tests       32 passed (32)
+
+  test/ring.test.ts        9 tests   — Phase 1 ring (unchanged)
+  test/kvstore.test.ts     8 tests   — Phase 1 KVStore (unchanged)
+  test/router.test.ts      9 tests   — Router unit tests (CacheClient mocked)
+  test/integration.test.ts 6 tests   — Real TCP, 3 nodes in-process, ports 17001-17003
+```
+
+Integration tests spin up all three `CacheNode` instances in-process and verify: cross-node SET/GET, DEL and subsequent miss, TTL expiry, key distribution across ≥2 nodes, and routing consistency across all entry points.
+
+---
+
+## Running Phase 2
+
+```bash
+npm test           # 32 tests — Phase 1 + Phase 2 unit and integration tests
+npm run build      # TypeScript compile check
+docker compose up --build   # Start 3-node cluster
+npm run smoke      # Smoke test against live cluster (27/27 operations)
+docker compose down         # Tear down cluster
+```
+
+---
+
 ## Roadmap
 
 - [x] **Phase 1 — Consistent Hashing Foundation**: Hash ring with 200 virtual nodes, KV store with TTL, distribution proof
-- [ ] **Phase 2 — Multi-Node Cluster**: Multiple independent Node.js processes, coordinator-less routing (any node accepts any request and proxies internally), Docker Compose setup
+- [x] **Phase 2 — Multi-Node Cluster**: Multiple independent Node.js processes, coordinator-less routing (any node accepts any request and proxies internally), Docker Compose setup
 - [ ] **Phase 3 — Replication**: Every key replicated to N+1 nodes clockwise on the ring, replica fallback on primary miss, TTL propagation across replicas
 - [ ] **Phase 4 — Gossip + Failure Detection**: SWIM-style heartbeat gossip, membership state machine (alive → suspect → dead), cluster-wide failure propagation
 - [ ] **Phase 5 — Failover + Rebalancing**: Automatic traffic rerouting to replicas on node failure, zero-downtime key rebalancing when nodes join or rejoin
@@ -112,4 +244,4 @@ npm run build   # TypeScript compile check
 
 ## Tech Stack
 
-Node.js · TypeScript · Vitest · SHA-1 (node:crypto) · fast-check (property tests)
+Node.js · TypeScript · Vitest · SHA-1 (node:crypto) · fast-check (property tests) · Docker Compose
