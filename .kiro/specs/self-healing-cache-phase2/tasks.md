@@ -61,7 +61,7 @@ Add the distributed networking layer on top of Phase 1. Phase 1 files are **neve
       - If `homeNode !== localNodeId` → get or create `CacheClient` for home node, `connect()` if needed, `send(req)`, return response; on network error return `{ ok: false, error: message }`
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10, 4.11_
 
-- [ ] 6. Implement `CacheNode`
+- [x] 6. Implement `CacheNode`
   - Create `src/node/CacheNode.ts`
     - Import `KVStore`, `Router`, `TcpServer`, `CLUSTER_CONFIG`, `getNodeInfo`, and all types needed
     - `constructor(nodeId: string, config: ClusterConfig)`
@@ -73,7 +73,7 @@ Add the distributed networking layer on top of Phase 1. Phase 1 files are **neve
     - Call `main()` if this file is run directly (check `import.meta.url` vs `process.argv[1]`)
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7_
 
-- [ ] 7. Add Docker support
+- [x] 7. Add Docker support
   - Create `Dockerfile` at repository root:
     - Base: `node:22-alpine`
     - `WORKDIR /app`
@@ -92,7 +92,7 @@ Add the distributed networking layer on top of Phase 1. Phase 1 files are **neve
     - `"node:start": "node dist/node/CacheNode.js"`
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 11.2, 11.3, 11.4_
 
-- [ ] 8. Implement smoke-test script
+- [x] 8. Implement smoke-test script
   - Create `scripts/smoke-test.ts`
     - Import `CacheClient` from `src/client/CacheClient.ts`; no other non-built-in imports
     - Connect a `CacheClient` to each of the three nodes (ports 7001, 7002, 7003)
@@ -104,7 +104,7 @@ Add the distributed networking layer on top of Phase 1. Phase 1 files are **neve
     - Disconnect all clients cleanly before exit
   - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9_
 
-- [ ] 9. Write Router unit tests
+- [x] 9. Write Router unit tests
   - Create `test/router.test.ts`
     - Use `vi.mock('../../src/client/CacheClient.js')` to prevent real TCP connections
     - Test local GET hit: key hashes to local node → `store.get` called, no forwarding
@@ -118,7 +118,7 @@ Add the distributed networking layer on top of Phase 1. Phase 1 files are **neve
     - Test ring population: verify all three node IDs appear in `ring.getDistribution()`
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7_
 
-- [ ] 10. Write multi-node integration tests
+- [x] 10. Write multi-node integration tests
   - Create `test/integration.test.ts`
     - In `beforeAll`: start all three `CacheNode` instances and a `CacheClient` per node; allow 200 ms for sockets to bind
     - In `afterAll`: `stop()` all nodes, `disconnect()` all clients
@@ -130,7 +130,7 @@ Add the distributed networking layer on top of Phase 1. Phase 1 files are **neve
     - Test: same key SET via node-a and GET via node-c → same value returned
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7_
 
-- [ ] 11. Final checkpoint — Build, test, and verify
+- [x] 11. Final checkpoint — Build, test, and verify
   - Run `npm run build` and confirm TypeScript compilation succeeds with no errors
   - Run `npm test` and confirm all tests pass (Phase 1 + Phase 2 `router.test.ts` + `integration.test.ts`)
   - Verify `npm run harness` still exits 0 (Phase 1 harness unaffected)
