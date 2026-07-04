@@ -14,4 +14,4 @@ COPY src/ ./src/
 RUN npm run build
 
 # Start a cache node — NODE_ID env var selects which node this container is
-CMD ["node", "dist/node/CacheNode.js"]
+CMD ["node", "dist/src/node/node-entry.js"]

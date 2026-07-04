@@ -8,7 +8,7 @@
     "test": "vitest run",
     "harness": "tsx test/distribution-harness.ts",
     "smoke": "tsx scripts/smoke-test.ts",
-    "node:start": "node dist/node/CacheNode.js"
+    "node:start": "node dist/src/node/node-entry.js"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",
