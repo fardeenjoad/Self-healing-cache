@@ -26,10 +26,11 @@ export type ClusterConfig = NodeInfo[];
 
 /** Wire-format command sent by a client to a cache node (Req 1.3, 1.5). */
 export interface CacheRequest {
-    command: "SET" | "GET" | "DEL";
+    command: "SET" | "GET" | "DEL" | "REPLICATE" | "REPLICATE_DEL";
     key: string;
     value?: string;
     ttl?: number;
+    expiresAt?: number | null;
     /**
      * Optional correlation ID assigned by CacheClient.
      * TcpServer echoes this field back in the CacheResponse so that

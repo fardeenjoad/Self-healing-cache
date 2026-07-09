@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fc from "fast-check";
 import { KVStore } from "../src/core/kvstore.js";
 
 describe("KVStore", () => {
@@ -66,5 +67,26 @@ describe("KVStore", () => {
         vi.advanceTimersByTime(10000);
         // Sweep is stopped — entry remains (size includes unswept expired entries)
         expect(store.size()).toBe(1);
+    });
+
+    // Feature: self-healing-cache-phase3, Property 1: setRaw stores exact expiresAt
+    it("setRaw stores exact expiresAt (Property 1)", () => {
+        fc.assert(
+            fc.property(
+                fc.string(),
+                fc.string(),
+                fc.oneof(fc.integer(), fc.constant(null)),
+                (key, value, expiresAt) => {
+                    const tempStore = new KVStore();
+                    try {
+                        tempStore.setRaw(key, value, expiresAt);
+                        expect(tempStore.getExpiresAt(key)).toBe(expiresAt);
+                    } finally {
+                        tempStore.stopSweeper();
+                    }
+                }
+            ),
+            { numRuns: 100 }
+        );
     });
 });
