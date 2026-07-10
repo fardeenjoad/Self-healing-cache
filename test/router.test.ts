@@ -3,6 +3,7 @@
  * CacheClient is fully mocked so all tests run in-process.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fc from "fast-check";
 import { ConsistentHashRing } from "../src/core/ring.js";
 import { KVStore } from "../src/core/kvstore.js";
 import { CLUSTER_CONFIG } from "../src/config/cluster.js";
@@ -157,5 +158,62 @@ describe("Router", () => {
         const res = await router.route({ command: "FLUSH" as never, key: "any-key" });
 
         expect(res).toEqual({ ok: false, error: "unknown command" });
+    });
+
+    // Feature: self-healing-cache-phase3, Property 2: REPLICATE Bypasses Ring Routing
+    it("REPLICATE command bypasses ring routing and executes locally (Property 2)", async () => {
+        await fc.assert(
+            fc.asyncProperty(
+                fc.string({ minLength: 1 }),
+                fc.string(),
+                fc.oneof(fc.integer({ min: Date.now() + 60000, max: Number.MAX_SAFE_INTEGER }), fc.constant(null)),
+                fc.constantFrom("node-a", "node-b", "node-c"),
+                async (key, value, expiresAt, localNodeId) => {
+                    const localStore = new KVStore();
+                    try {
+                        const router = new Router(localNodeId, CLUSTER_CONFIG, localStore);
+                        const res = await router.route({
+                            command: "REPLICATE",
+                            key,
+                            value,
+                            expiresAt,
+                        });
+                        expect(res).toEqual({ ok: true });
+                        expect(localStore.get(key)).toBe(value);
+                        expect(localStore.getExpiresAt(key)).toBe(expiresAt);
+                    } finally {
+                        localStore.stopSweeper();
+                    }
+                }
+            ),
+            { numRuns: 50 }
+        );
+    });
+
+    // Feature: self-healing-cache-phase3, Property 3: REPLICATE_DEL Bypasses Ring Routing
+    it("REPLICATE_DEL command bypasses ring routing and executes locally (Property 3)", async () => {
+        await fc.assert(
+            fc.asyncProperty(
+                fc.string({ minLength: 1 }),
+                fc.string(),
+                fc.constantFrom("node-a", "node-b", "node-c"),
+                async (key, value, localNodeId) => {
+                    const localStore = new KVStore();
+                    try {
+                        localStore.set(key, value);
+                        const router = new Router(localNodeId, CLUSTER_CONFIG, localStore);
+                        const res = await router.route({
+                            command: "REPLICATE_DEL",
+                            key,
+                        });
+                        expect(res).toEqual({ ok: true });
+                        expect(localStore.get(key)).toBeNull();
+                    } finally {
+                        localStore.stopSweeper();
+                    }
+                }
+            ),
+            { numRuns: 50 }
+        );
     });
 });

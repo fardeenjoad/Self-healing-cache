@@ -105,127 +105,127 @@ Extend the 3-node TCP cluster established in Phase 2 with key replication. Every
     - Delegate to `this.repairQueue.getQueue()` and return the result
     - _Requirements: 8.6, 8.7_
 
-- [ ] 5. Update `executeLocally()` in `Router.ts` — REPLICATE, REPLICATE_DEL, async SET, sync DEL, and GET fallback
-  - [ ] 5.1 Handle `REPLICATE` and `REPLICATE_DEL` cases in `executeLocally`
+- [x] 5. Update `executeLocally()` in `Router.ts` — REPLICATE, REPLICATE_DEL, async SET, sync DEL, and GET fallback
+  - [x] 5.1 Handle `REPLICATE` and `REPLICATE_DEL` cases in `executeLocally`
     - Change `executeLocally` return type signature to `async` (`private async executeLocally(req: CacheRequest): Promise<CacheResponse>`)
     - Add `case "REPLICATE"`: call `this.localStore.setRaw(req.key, req.value!, req.expiresAt ?? null)` and return `{ ok: true }`
     - Add `case "REPLICATE_DEL"`: call `this.localStore.del(req.key)` and return `{ ok: true }`
     - _Requirements: 3.1, 3.2_
 
-  - [ ]* 5.2 Write property test for REPLICATE bypasses ring routing
+  - [x]* 5.2 Write property test for REPLICATE bypasses ring routing
     - **Property 2: REPLICATE Bypasses Ring Routing**
     - **Validates: Requirements 3.1, 3.5**
     - Add in `test/router.test.ts`; tag: `// Feature: self-healing-cache-phase3, Property 2: REPLICATE bypasses ring routing`
     - For any key (regardless of which node the ring designates), sending a `REPLICATE` command to a node must store the key locally and return `{ ok: true }`
 
-  - [ ]* 5.3 Write property test for REPLICATE_DEL bypasses ring routing
+  - [x]* 5.3 Write property test for REPLICATE_DEL bypasses ring routing
     - **Property 3: REPLICATE_DEL Bypasses Ring Routing**
     - **Validates: Requirements 3.2, 3.5**
     - Add in `test/router.test.ts`; tag: `// Feature: self-healing-cache-phase3, Property 3: REPLICATE_DEL bypasses ring routing`
     - For any key present in a node's local store, sending `REPLICATE_DEL` must remove it and return `{ ok: true }` regardless of ring assignment
 
-  - [ ] 5.4 Update `SET` case in `executeLocally` for async fan-out replication
+  - [x] 5.4 Update `SET` case in `executeLocally` for async fan-out replication
     - After `this.localStore.set(req.key, req.value!, req.ttl)`, read `const expiresAt = this.localStore.getExpiresAt(req.key) ?? null`
     - Call `getReplicaNodes(req.key)` and fire `void this.replicateToNode(replica.nodeId, req.key, req.value!, expiresAt)` for each replica (no await)
     - Return `{ ok: true }` immediately — the replication runs in the background
     - When a key has no TTL, `expiresAt` will be `null`; pass it as-is
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-  - [ ] 5.5 Update `DEL` case in `executeLocally` for synchronous fan-out replication
+  - [x] 5.5 Update `DEL` case in `executeLocally` for synchronous fan-out replication
     - After `this.localStore.del(req.key)`, call `getReplicaNodes(req.key)`, then `await Promise.all(replicas.map(r => this.replicateDelToNode(r.nodeId, req.key)))`
     - Wrap in `try/catch`: on success return `{ ok: true }`; on any throw return `{ ok: false, error: <message> }`
     - Both replica DEL operations must run concurrently (via `Promise.all`)
     - _Requirements: 6.1, 6.2, 6.3, 6.4_
 
-  - [ ] 5.6 Update `GET` case in `executeLocally` for replica fallback
+  - [x] 5.6 Update `GET` case in `executeLocally` for replica fallback
     - If `localStore.get(req.key)` returns non-null, return `{ ok: true, value }` immediately
     - If null, iterate `getReplicaNodes(req.key)` in order; for each replica call `await this.forwardToPeer(replica.nodeId, req)`
     - On first replica hit (`resp.ok && resp.value !== undefined`): call `this.repairQueue.enqueue(req.key)` and return `{ ok: true, value: resp.value }`
     - If all replicas miss or are unreachable, return `{ ok: true }` (full miss, no `value` field)
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
 
-  - [ ]* 5.7 Write property test for replica fallback and repair queue enqueue
+  - [x]* 5.7 Write property test for replica fallback and repair queue enqueue
     - **Property 7: Replica Fallback Returns Value and Enqueues Key**
     - **Validates: Requirements 7.2, 7.3**
     - Add in `test/replication.test.ts`; tag: `// Feature: self-healing-cache-phase3, Property 7: replica fallback returns value and enqueues key`
     - Set up a key via `setRaw` on replicas only; issue a GET on the primary; assert response contains the value and `router.getRepairQueue()` contains the key
 
-- [ ] 6. Checkpoint — verify Router unit tests pass
+- [x] 6. Checkpoint — verify Router unit tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Create `test/replication.test.ts` — integration tests
-  - [ ] 7.1 Set up isolated 3-node cluster on ports 17001–17003
+- [x] 7. Create `test/replication.test.ts` — integration tests
+  - [x] 7.1 Set up isolated 3-node cluster on ports 17001–17003
     - Create `test/replication.test.ts`; define `TEST_CONFIG` with `test-node-a/b/c` on ports 17001–17003
     - Use `beforeAll` / `afterAll` to start all 3 `CacheNode` instances and connect 3 `CacheClient` instances
     - Call `node.stop()` (which invokes `kvStore.stopSweeper()`) in `afterAll` to prevent timer leaks
     - Do NOT import or modify `ring.test.ts`, `kvstore.test.ts`, `router.test.ts`, or `integration.test.ts`
     - _Requirements: 9.1, 9.6, 9.7_
 
-  - [ ] 7.2 Integration test: async SET replication — all 3 nodes hold the value
+  - [x] 7.2 Integration test: async SET replication — all 3 nodes hold the value
     - SET a key on any node; wait 50 ms; GET the key from all 3 ports directly
     - Assert all 3 GETs return the expected value
     - _Requirements: 9.2_
 
-  - [ ]* 7.3 Write property-based integration test for async SET replication convergence
+  - [x]* 7.3 Write property-based integration test for async SET replication convergence
     - **Property 4: Async SET Replication Convergence**
     - **Validates: Requirements 5.1, 5.2**
     - Tag: `// Feature: self-healing-cache-phase3, Property 4: async SET replication convergence`
     - Generate arbitrary key/value pairs; SET on primary; wait 50 ms; assert all 3 nodes return the value
 
-  - [ ] 7.4 Integration test: TTL replication — all 3 nodes have the same `expiresAt`
+  - [x] 7.4 Integration test: TTL replication — all 3 nodes have the same `expiresAt`
     - SET a key with a TTL; after async delay, access each node's Router `getExpiresAt` (or via direct `localStore` inspection)
     - Assert all 3 `expiresAt` values are identical
     - _Requirements: 9.3_
 
-  - [ ]* 7.5 Write property-based integration test for TTL timestamp consistency
+  - [x]* 7.5 Write property-based integration test for TTL timestamp consistency
     - **Property 5: TTL Timestamp Consistency Across Replicas**
     - **Validates: Requirements 5.3, 5.4**
     - Tag: `// Feature: self-healing-cache-phase3, Property 5: TTL timestamp consistency across replicas`
     - Generate arbitrary key/value/TTL combinations; assert all 3 nodes report the same `expiresAt`
 
-  - [ ] 7.6 Integration test: synchronous DEL replication — all 3 nodes return miss
+  - [x] 7.6 Integration test: synchronous DEL replication — all 3 nodes return miss
     - SET a key, wait for async replication, DEL the key; assert all 3 nodes return a cache miss immediately (no delay needed)
     - _Requirements: 9.4_
 
-  - [ ]* 7.7 Write property-based integration test for sync DEL across all nodes
+  - [x]* 7.7 Write property-based integration test for sync DEL across all nodes
     - **Property 6: Synchronous DEL Removes Key from All Nodes**
     - **Validates: Requirements 6.1, 6.2**
     - Tag: `// Feature: self-healing-cache-phase3, Property 6: synchronous DEL removes key from all nodes`
     - Generate arbitrary key/value pairs; SET then DEL; assert all 3 nodes GET returns miss
 
-  - [ ] 7.8 Integration test: GET replica fallback + repair queue enqueue
+  - [x] 7.8 Integration test: GET replica fallback + repair queue enqueue
     - Use `setRaw` to place a key on replica nodes only (bypassing the primary's local store)
     - Issue a GET through the normal routing path (routed to the primary)
     - Assert the response contains the correct value
     - Assert the key appears in `router.getRepairQueue()` after the GET
     - _Requirements: 9.5_
 
-- [ ] 8. Checkpoint — verify all replication integration tests pass
+- [x] 8. Checkpoint — verify all replication integration tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Extend `scripts/smoke-test.ts` with the `── REPLICATE ──` section
-  - [ ] 9.1 Add the `── REPLICATE ──` smoke-test section after the existing DEL section
+- [x] 9. Extend `scripts/smoke-test.ts` with the `── REPLICATE ──` section
+  - [x] 9.1 Add the `── REPLICATE ──` smoke-test section after the existing DEL section
     - Add a clearly labelled section `── REPLICATE ──` after the DEL section
     - Use the existing `pass` / `fail` helper functions; contribute to `passed` / `failed` counters
     - Do NOT modify the existing SET, GET cross-node, or DEL sections
     - _Requirements: 10.1, 10.5, 10.6_
 
-  - [ ] 9.2 Smoke test: verify async replication for at least 3 keys
+  - [x] 9.2 Smoke test: verify async replication for at least 3 keys
     - SET at least 3 keys; wait ~50 ms; GET each key from all 3 nodes
     - Assert each key is readable from all 3 nodes, recording pass/fail for each check
     - _Requirements: 10.2_
 
-  - [ ] 9.3 Smoke test: verify TTL expiry consistency across all nodes
+  - [x] 9.3 Smoke test: verify TTL expiry consistency across all nodes
     - SET at least 1 key with a short TTL; wait for TTL to elapse; GET from all 3 nodes
     - Assert all 3 nodes return a cache miss after expiry
     - _Requirements: 10.3_
 
-  - [ ] 9.4 Smoke test: verify synchronous DEL replication across all nodes
+  - [x] 9.4 Smoke test: verify synchronous DEL replication across all nodes
     - DEL at least 1 previously-replicated key; GET from all 3 nodes
     - Assert all 3 nodes return a miss immediately after DEL
     - _Requirements: 10.4_
 
-- [ ] 10. Final checkpoint — ensure all tests pass
+- [x] 10. Final checkpoint — ensure all tests pass
   - Ensure all tests pass (`npm test`), ask the user if questions arise.
 
 ## Notes

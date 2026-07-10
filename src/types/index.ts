@@ -31,6 +31,7 @@ export interface CacheRequest {
     value?: string;
     ttl?: number;
     expiresAt?: number | null;
+    isFallback?: boolean;
     /**
      * Optional correlation ID assigned by CacheClient.
      * TcpServer echoes this field back in the CacheResponse so that

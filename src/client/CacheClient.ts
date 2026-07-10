@@ -35,6 +35,7 @@ export class CacheClient {
 
     /** Map from correlation id → pending promise callbacks. */
     private pending: Map<string, PendingEntry> = new Map();
+    private connectPromise: Promise<void> | null = null;
 
     constructor(host: string, port: number) {
         this.host = host;
@@ -47,7 +48,14 @@ export class CacheClient {
      * Rejects on any connection error.
      */
     connect(): Promise<void> {
-        return new Promise<void>((resolve, reject) => {
+        if (this.socket !== null) {
+            return Promise.resolve();
+        }
+        if (this.connectPromise !== null) {
+            return this.connectPromise;
+        }
+
+        this.connectPromise = new Promise<void>((resolve, reject) => {
             const socket = new net.Socket();
 
             socket.on("data", (chunk: Buffer) => {
@@ -63,11 +71,10 @@ export class CacheClient {
                 }
                 this.pending.clear();
                 this.socket = null;
+                this.connectPromise = null;
             });
 
             socket.on("error", (err: Error) => {
-                // Pre-connect errors reject the connect() promise.
-                // Post-connect errors also fire 'close', handled above.
                 reject(err);
             });
 
@@ -80,7 +87,11 @@ export class CacheClient {
                 this.socket = socket;
                 resolve();
             });
+        }).finally(() => {
+            this.connectPromise = null;
         });
+
+        return this.connectPromise;
     }
 
     /**
