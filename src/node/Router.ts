@@ -1,7 +1,8 @@
 import { ConsistentHashRing } from "../core/ring.js";
 import { KVStore } from "../core/kvstore.js";
 import { CacheClient } from "../client/CacheClient.js";
-import type { CacheRequest, CacheResponse, ClusterConfig } from "../types/index.js";
+import { ReplicationManager } from "./ReplicationManager.js";
+import type { CacheRequest, CacheResponse, ClusterConfig, NodeInfo } from "../types/index.js";
 
 /**
  * Routes incoming cache requests to the correct node in the cluster using a
@@ -35,6 +36,7 @@ export class Router {
     private readonly peers: Map<string, CacheClient>;
     private readonly config: ClusterConfig;
     private readonly connectedPeers: Set<string> = new Set();
+    private readonly repairQueue: ReplicationManager = new ReplicationManager();
 
     constructor(localNodeId: string, config: ClusterConfig, localStore: KVStore) {
         this.localNodeId = localNodeId;
@@ -48,12 +50,22 @@ export class Router {
         }
 
         // Build a CacheClient for every remote peer (not for this node itself).
-        // Use 127.0.0.1 when host is "0.0.0.0" — that is a server bind address,
-        // not a routable client address.
+        //
+        // Host resolution priority (for connecting to peers, not binding):
+        //   1. PEER_<NODEID>_HOST env var — set by docker-compose for Docker
+        //      inter-node routing (e.g. PEER_NODE_B_HOST=node-b).
+        //   2. NodeInfo.host if it is a routable address (not the bind wildcard).
+        //   3. "127.0.0.1" — fallback for local / test environments.
+        //
+        // The env var name is derived from nodeId: "node-b" → "PEER_NODE_B_HOST"
+        // (upper-cased, hyphens replaced with underscores, wrapped in PEER_…_HOST).
         this.peers = new Map();
         for (const info of config) {
             if (info.nodeId !== localNodeId) {
-                const connectHost = info.host === "0.0.0.0" ? "127.0.0.1" : info.host;
+                const envKey = `PEER_${info.nodeId.toUpperCase().replace(/-/g, "_")}_HOST`;
+                const connectHost =
+                    process.env[envKey] ??
+                    (info.host !== "0.0.0.0" ? info.host : "127.0.0.1");
                 this.peers.set(info.nodeId, new CacheClient(connectHost, info.port));
             }
         }
@@ -84,11 +96,20 @@ export class Router {
      */
     async route(req: CacheRequest): Promise<CacheResponse> {
         // 1. Validate before any ring lookup.
-        if (req.command !== "GET" && req.command !== "SET" && req.command !== "DEL") {
+        const validCommands = ["GET", "SET", "DEL", "REPLICATE", "REPLICATE_DEL"];
+        if (!validCommands.includes(req.command)) {
             return { ok: false, error: "unknown command" };
         }
         if (req.command === "SET" && req.value === undefined) {
             return { ok: false, error: "SET requires value" };
+        }
+        if (req.command === "REPLICATE" && req.value === undefined) {
+            return { ok: false, error: "REPLICATE requires value" };
+        }
+
+        // REPLICATE and REPLICATE_DEL bypass ring routing entirely — always local
+        if (req.command === "REPLICATE" || req.command === "REPLICATE_DEL") {
+            return this.executeLocally(req);
         }
 
         // 2. Determine the home node.
@@ -192,5 +213,98 @@ export class Router {
                 error: err instanceof Error ? err.message : String(err),
             };
         }
+    }
+
+    /**
+     * Returns the NodeInfo objects for the 2 replica nodes responsible for `key`.
+     *
+     * Calls ring.getNodes(key, 3) to get the ordered list of up to 3 distinct
+     * physical nodes clockwise from the key's ring position (primary first).
+     * Filters out localNodeId and maps the remaining IDs to NodeInfo objects
+     * from the cluster config.
+     *
+     * In a 3-node cluster this always returns exactly 2 NodeInfo objects.
+     * If the ring has fewer than 3 distinct nodes, fewer are returned.
+     *
+     * @param key - The cache key whose replicas are needed.
+     * @returns Array of NodeInfo for replica nodes (excluding this node).
+     */
+    private getReplicaNodes(key: string): NodeInfo[] {
+        return this.ring
+            .getNodes(key, 3)
+            .filter((nodeId) => nodeId !== this.localNodeId)
+            .map((nodeId) => this.config.find((n) => n.nodeId === nodeId)!)
+            .filter(Boolean);
+    }
+
+    /**
+     * Sends a REPLICATE command to the specified target node, instructing it to
+     * store key/value with the given absolute expiresAt timestamp.
+     *
+     * This is fire-and-forget safe: failures are caught, a warning is logged,
+     * and the returned Promise always resolves (never rejects). This allows callers
+     * to use `void replicateToNode(...)` without risk of unhandled rejection.
+     *
+     * Enforces a 5-second timeout using the same race pattern as forwardToPeer.
+     *
+     * @param targetNodeId - The node to replicate to.
+     * @param key          - The cache key.
+     * @param value        - The value to store.
+     * @param expiresAt    - Absolute expiry timestamp in ms, or null.
+     */
+    public async replicateToNode(
+        targetNodeId: string,
+        key: string,
+        value: string,
+        expiresAt: number | null
+    ): Promise<void> {
+        try {
+            const resp = await this.forwardToPeer(targetNodeId, {
+                command: "REPLICATE",
+                key,
+                value,
+                expiresAt,
+            });
+            if (!resp.ok) {
+                throw new Error(resp.error ?? "REPLICATE returned ok:false");
+            }
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[Replication] WARNING: failed to replicate key ${key} to ${targetNodeId}: ${msg}`);
+        }
+    }
+
+    /**
+     * Sends a REPLICATE_DEL command to the specified target node, instructing it
+     * to delete the given key.
+     *
+     * Unlike replicateToNode, this method THROWS on failure so that the DEL path
+     * can treat replication failures as fatal and return {ok:false} to the client.
+     *
+     * Enforces a 5-second timeout using the same race pattern as forwardToPeer.
+     *
+     * @param targetNodeId - The node to send the delete command to.
+     * @param key          - The key to delete.
+     * @throws {Error} If the target is unreachable, times out, or returns ok:false.
+     */
+    public async replicateDelToNode(targetNodeId: string, key: string): Promise<void> {
+        const resp = await this.forwardToPeer(targetNodeId, {
+            command: "REPLICATE_DEL",
+            key,
+        });
+        if (!resp.ok) {
+            throw new Error(
+                `REPLICATE_DEL to ${targetNodeId} failed: ${resp.error ?? "unknown error"}`
+            );
+        }
+    }
+
+    /**
+     * Returns the current repair queue set (for testing and Phase 5 processing).
+     *
+     * @returns The internal Set<string> of keys pending read-repair.
+     */
+    public getRepairQueue(): Set<string> {
+        return this.repairQueue.getQueue();
     }
 }

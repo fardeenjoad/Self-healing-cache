@@ -40,6 +40,31 @@ export class KVStore {
     }
 
     /**
+     * Stores a key-value pair verbatim with a specific absolute expiration timestamp.
+     * Overwrites the value and expiresAt if the key already exists.
+     *
+     * @param key - The string key under which the value is stored.
+     * @param value - The string value to store.
+     * @param expiresAt - The absolute Unix timestamp (ms) at which the entry expires, or null if it never expires.
+     */
+    setRaw(key: string, value: string, expiresAt: number | null): void {
+        this.store.set(key, { value, expiresAt });
+    }
+
+    /**
+     * Retrieves the absolute expiration timestamp for a key.
+     * Does not perform expiry checks or lazy deletion.
+     *
+     * @param key - The string key to inspect.
+     * @returns The stored expiresAt timestamp (number or null), or undefined if the key is not present.
+     */
+    getExpiresAt(key: string): number | null | undefined {
+        const entry = this.store.get(key);
+        if (entry === undefined) return undefined;
+        return entry.expiresAt;
+    }
+
+    /**
      * Retrieves the value associated with `key`, or `null` if the key does not
      * exist or has expired.
      *
