@@ -97,6 +97,100 @@ async function main(): Promise<void> {
         }
     }
 
+    // ── Phase 4: REPLICATE ──────────────────────────────────────────────────
+    console.log("\n── REPLICATE ──");
+    const repKeys = [
+        { key: "smoke:rep:1", value: "rep-val-1" },
+        { key: "smoke:rep:2", value: "rep-val-2" },
+        { key: "smoke:rep:3", value: "rep-val-3" },
+    ];
+    for (const { key, value } of repKeys) {
+        const setRes = await clients[0].send({ command: "SET", key, value });
+        if (setRes.ok) {
+            pass(`SET ${key} for replication`);
+        } else {
+            fail(
+                `SET ${key} for replication`,
+                "ok:true",
+                `ok:false error:${setRes.error ?? "(none)"}`
+            );
+        }
+    }
+
+    // Wait ~50 ms for replication
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    for (const { key, value } of repKeys) {
+        for (let i = 0; i < 3; i++) {
+            const getRes = await clients[i].send({ command: "GET", key });
+            if (getRes.ok && getRes.value === value) {
+                pass(`GET ${key} from ${NODES[i].nodeId} (replicated)`);
+            } else {
+                fail(
+                    `GET ${key} from ${NODES[i].nodeId} (replicated)`,
+                    value,
+                    getRes.value ?? "(undefined)"
+                );
+            }
+        }
+    }
+
+    // Verify TTL expiry consistency across all nodes
+    const ttlKey = "smoke:rep:ttl";
+    const ttlVal = "ttl-rep-val";
+    const setTtlRes = await clients[0].send({ command: "SET", key: ttlKey, value: ttlVal, ttl: 1 });
+    if (setTtlRes.ok) {
+        pass(`SET ${ttlKey} with TTL 1s`);
+    } else {
+        fail(
+            `SET ${ttlKey} with TTL 1s`,
+            "ok:true",
+            `ok:false error:${setTtlRes.error ?? "(none)"}`
+        );
+    }
+
+    // Wait for TTL to elapse
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    for (let i = 0; i < 3; i++) {
+        const getRes = await clients[i].send({ command: "GET", key: ttlKey });
+        if (getRes.ok && getRes.value === undefined) {
+            pass(`GET expired ${ttlKey} from ${NODES[i].nodeId} returns miss`);
+        } else {
+            fail(
+                `GET expired ${ttlKey} from ${NODES[i].nodeId} returns miss`,
+                "(undefined)",
+                getRes.value ?? "(value present)"
+            );
+        }
+    }
+
+    // Verify synchronous DEL replication across all nodes
+    const syncDelKey = "smoke:rep:1";
+    const delRes = await clients[0].send({ command: "DEL", key: syncDelKey });
+    if (delRes.ok) {
+        pass(`DEL ${syncDelKey} synchronously`);
+    } else {
+        fail(
+            `DEL ${syncDelKey} synchronously`,
+            "ok:true",
+            `ok:false error:${delRes.error ?? "(none)"}`
+        );
+    }
+
+    for (let i = 0; i < 3; i++) {
+        const getRes = await clients[i].send({ command: "GET", key: syncDelKey });
+        if (getRes.ok && getRes.value === undefined) {
+            pass(`GET deleted ${syncDelKey} from ${NODES[i].nodeId} returns miss`);
+        } else {
+            fail(
+                `GET deleted ${syncDelKey} from ${NODES[i].nodeId} returns miss`,
+                "(undefined)",
+                getRes.value ?? "(value present)"
+            );
+        }
+    }
+
     // Disconnect all clients cleanly
     for (const client of clients) {
         await client.disconnect();

@@ -62,6 +62,7 @@ export class CacheNode {
      * releasing all held resources.
      */
     async stop(): Promise<void> {
+        await this.router.stop();
         await this.tcpServer.close();
         this.kvStore.stopSweeper();
         console.log(`[CacheNode] ${this.nodeId} stopped`);

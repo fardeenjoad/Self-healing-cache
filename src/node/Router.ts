@@ -108,7 +108,8 @@ export class Router {
         }
 
         // REPLICATE and REPLICATE_DEL bypass ring routing entirely — always local
-        if (req.command === "REPLICATE" || req.command === "REPLICATE_DEL") {
+        // GET with isFallback: true also bypasses ring routing to retrieve the value from replica's local store
+        if (req.command === "REPLICATE" || req.command === "REPLICATE_DEL" || req.isFallback) {
             return this.executeLocally(req);
         }
 
@@ -125,17 +126,56 @@ export class Router {
         return this.forwardToPeer(homeNodeId, req);
     }
 
-    private executeLocally(req: CacheRequest): CacheResponse {
+    private async executeLocally(req: CacheRequest): Promise<CacheResponse> {
         switch (req.command) {
             case "GET": {
                 const val = this.localStore.get(req.key);
-                return { ok: true, value: val ?? undefined };
+                if (val !== null) {
+                    return { ok: true, value: val };
+                }
+                // Replica fallback — only if this is NOT already a fallback request
+                if (!req.isFallback) {
+                    const replicas = this.getReplicaNodes(req.key);
+                    for (const replica of replicas) {
+                        const resp = await this.forwardToPeer(replica.nodeId, { ...req, isFallback: true });
+                        if (resp.ok && resp.value !== undefined) {
+                            this.repairQueue.enqueue(req.key);
+                            return { ok: true, value: resp.value };
+                        }
+                    }
+                }
+                return { ok: true }; // full miss
             }
             case "SET": {
                 this.localStore.set(req.key, req.value!, req.ttl);
+                const expiresAt = this.localStore.getExpiresAt(req.key) ?? null;
+                // Fire-and-forget replication
+                const replicas = this.getReplicaNodes(req.key);
+                for (const replica of replicas) {
+                    void this.replicateToNode(replica.nodeId, req.key, req.value!, expiresAt);
+                }
                 return { ok: true };
             }
             case "DEL": {
+                this.localStore.del(req.key);
+                const replicas = this.getReplicaNodes(req.key);
+                try {
+                    await Promise.all(
+                        replicas.map((r) => this.replicateDelToNode(r.nodeId, req.key))
+                    );
+                    return { ok: true };
+                } catch (err: unknown) {
+                    return {
+                        ok: false,
+                        error: err instanceof Error ? err.message : String(err),
+                    };
+                }
+            }
+            case "REPLICATE": {
+                this.localStore.setRaw(req.key, req.value!, req.expiresAt ?? null);
+                return { ok: true };
+            }
+            case "REPLICATE_DEL": {
                 this.localStore.del(req.key);
                 return { ok: true };
             }
@@ -191,17 +231,21 @@ export class Router {
 
             // 5-second timeout race.
             const TIMEOUT_MS = 5000;
-            const timeoutPromise = new Promise<CacheResponse>((_, reject) =>
-                setTimeout(() => {
+            let timeoutId: ReturnType<typeof setTimeout> | undefined;
+            const timeoutPromise = new Promise<CacheResponse>((_, reject) => {
+                timeoutId = setTimeout(() => {
                     // Destroy the socket so the pending send() rejects and
                     // the connection is reset for the next attempt.
                     (client as unknown as { socket?: { destroy(): void } }).socket?.destroy();
                     this.connectedPeers.delete(homeNodeId);
                     reject(new Error(`Forward to ${homeNodeId} timed out after ${TIMEOUT_MS}ms`));
-                }, TIMEOUT_MS)
-            );
+                }, TIMEOUT_MS);
+            });
 
             const response = await Promise.race([client.send(req), timeoutPromise]);
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
             return response;
 
         } catch (err: unknown) {
@@ -306,5 +350,15 @@ export class Router {
      */
     public getRepairQueue(): Set<string> {
         return this.repairQueue.getQueue();
+    }
+
+    /**
+     * Closes and disconnects all peer clients.
+     */
+    public async stop(): Promise<void> {
+        for (const client of this.peers.values()) {
+            await client.disconnect();
+        }
+        this.connectedPeers.clear();
     }
 }
