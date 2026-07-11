@@ -224,11 +224,124 @@ docker compose down         # Tear down cluster
 
 ---
 
+## Phase 3 — Replication ✓ Complete
+
+### What was built
+
+Phase 3 extends the cluster's capability with fault tolerance and replication. Keys are now stored on three nodes (1 primary and 2 replicas) to prevent data loss and ensure read availability in the face of coordinator/owner node failure.
+
+New files added:
+- `src/node/ReplicationManager.ts` – Manages the read-repair queue (deduplicated via an in-memory `Set<string>`) to track keys that were served from a replica and need convergence (healing process deferred to Phase 5).
+
+Modified existing files:
+- `src/types/index.ts` – Extended `CacheRequest` type definitions with internal `REPLICATE` and `REPLICATE_DEL` commands, the absolute `expiresAt` field, and an `isFallback` routing flag.
+- `src/core/kvstore.ts` – Added `setRaw(key, value, expiresAt)` and `getExpiresAt(key)` to store and inspect absolute expiry timestamps without triggering lazy deletions.
+- `src/node/Router.ts` – Updated `route()` to bypass ring routing for `REPLICATE` / `REPLICATE_DEL` and `isFallback` requests, changed `executeLocally()` to be asynchronous to support replication fan-out, implemented GET fallback to replica nodes, and added `Router.stop()` to cleanly tear down peer client connections.
+- `src/node/CacheNode.ts` – Integrated `Router.stop()` into `CacheNode.stop()` to close peer client sockets on node shutdown.
+- `scripts/smoke-test.ts` – Added E2E verification of replication, TTL consistency, and DEL synchronization across the active Docker cluster.
+
+---
+
+### Key design decisions
+
+**Async replication on SET.** When a client performs a `SET` request on the primary node, the primary writes the key/value to its local store and immediately responds with `{ ok: true }` to the client. It then propagates `REPLICATE` commands to the 2 replica nodes asynchronously in the background. This ensures write latency remains low and client performance is unaffected by replication overhead.
+
+**Synchronous replication on DEL.** To prevent "ghost reads" (where a client deletes a key but a subsequent read retrieves the stale value from a replica), `DEL` commands propagate replication to all replica nodes concurrently using `Promise.all` and block the client response until all replicas acknowledge the deletion. If any replica deletion fails, the client receives `{ ok: false }`.
+
+**Absolute timestamps for TTL.** Replicas receive the pre-calculated absolute `expiresAt` timestamp from the primary instead of a relative TTL value. This avoids clock skew or replication delays affecting the key's lifespan across the cluster, ensuring that key expiration is perfectly consistent across all 3 nodes.
+
+**Circular routing loops protection.** To prevent replica fallback queries from looping infinitely between replica nodes when a key is missing on the primary (e.g., node-a forwards fallback to node-b, which forwards it to node-c, etc.), we introduced an `isFallback: true` request flag. Any request marked as a fallback bypasses consistent hash ring routing and is executed strictly locally on the replica without forwarding.
+
+---
+
+### Property-based testing verification
+
+We used `fast-check` to verify 10 distinct correctness properties across KVStore, Router, and ReplicationManager:
+
+- **Property 1**: `setRaw` stores exact `expiresAt` verbatim without arithmetic transformation.
+- **Property 2**: `REPLICATE` command bypasses ring routing and executes locally on the receiving node.
+- **Property 3**: `REPLICATE_DEL` command bypasses ring routing and executes locally.
+- **Property 4**: Async `SET` replication converges values on all 3 nodes.
+- **Property 5**: TTL timestamp consistency is maintained across all replicas.
+- **Property 6**: Synchronous `DEL` deletes keys from all 3 nodes before returning.
+- **Property 7**: GET replica fallback returns the value from the first available replica on primary miss and enqueues the key.
+- **Property 8**: Repair queue enqueue/drain round-trip behaves correctly.
+- **Property 9**: Repair queue deduplicates keys.
+- **Property 10**: `getReplicaNodes` returns the correct 2 non-local replica nodes.
+
+---
+
+### Running Phase 3
+
+**Prerequisites:** Docker and Docker Compose installed.
+
+```bash
+# Build images and start the 3-node cluster
+docker compose up --build
+
+# In a separate terminal — run the extended smoke test (47/47 assertions)
+npm run smoke
+```
+
+Expected smoke-test output:
+
+```
+[INFO] Connected to node-a on port 7001
+[INFO] Connected to node-b on port 7002
+[INFO] Connected to node-c on port 7003
+
+── SET ──
+[PASS] SET smoke:a:1 → node-a
+...
+
+── GET (cross-node) ──
+[PASS] GET smoke:a:1 from node-b
+...
+
+── DEL ──
+[PASS] DEL smoke:a:1 via node-b
+...
+
+── REPLICATE ──
+[PASS] SET smoke:rep:1 for replication
+[PASS] SET smoke:rep:2 for replication
+[PASS] SET smoke:rep:3 for replication
+[PASS] GET smoke:rep:1 from node-a (replicated)
+[PASS] GET smoke:rep:1 from node-b (replicated)
+[PASS] GET smoke:rep:1 from node-c (replicated)
+...
+[PASS] SET smoke:rep:ttl with TTL 1s
+[PASS] GET expired smoke:rep:ttl from node-a returns miss
+...
+[PASS] DEL smoke:rep:1 synchronously
+[PASS] GET deleted smoke:rep:1 from node-a returns miss
+...
+
+All smoke tests passed. (47/47)
+```
+
+To run all unit and integration tests (including the 10 fast-check properties):
+
+```bash
+npm install
+npm test
+```
+
+Expected test run:
+
+```
+ Test Files  5 passed (5)
+      Tests  46 passed (46)
+   Duration  5.66s
+```
+
+---
+
 ## Roadmap
 
 - [x] **Phase 1 — Consistent Hashing Foundation**: Hash ring with 200 virtual nodes, KV store with TTL, distribution proof
 - [x] **Phase 2 — Multi-Node Cluster**: Multiple independent Node.js processes, coordinator-less routing (any node accepts any request and proxies internally), Docker Compose setup
-- [ ] **Phase 3 — Replication**: Every key replicated to N+1 nodes clockwise on the ring, replica fallback on primary miss, TTL propagation across replicas
+- [x] **Phase 3 — Replication**: Every key replicated to N+1 nodes clockwise on the ring, replica fallback on primary miss, TTL propagation across replicas
 - [ ] **Phase 4 — Gossip + Failure Detection**: SWIM-style heartbeat gossip, membership state machine (alive → suspect → dead), cluster-wide failure propagation
 - [ ] **Phase 5 — Failover + Rebalancing**: Automatic traffic rerouting to replicas on node failure, zero-downtime key rebalancing when nodes join or rejoin
 - [ ] **Phase 6 — Chaos Demo**: Live kill of a random node mid-traffic, zero failed client requests beyond one configurable retry
