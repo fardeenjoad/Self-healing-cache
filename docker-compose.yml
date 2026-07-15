@@ -19,6 +19,7 @@ services:
       - PEER_NODE_C_HOST=node-c
     ports:
       - "7001:7001"
+      - "8001:8001/udp"
     networks:
       - cache-net
 
@@ -30,6 +31,7 @@ services:
       - PEER_NODE_C_HOST=node-c
     ports:
       - "7002:7002"
+      - "8002:8002/udp"
     networks:
       - cache-net
 
@@ -41,5 +43,6 @@ services:
       - PEER_NODE_B_HOST=node-b
     ports:
       - "7003:7003"
+      - "8003:8003/udp"
     networks:
       - cache-net
