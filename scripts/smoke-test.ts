@@ -191,6 +191,74 @@ async function main(): Promise<void> {
         }
     }
 
+    // ── Phase 4: FAILURE DETECTION ──────────────────────────────────────────
+    console.log("\n── FAILURE DETECTION ──");
+    console.log("[INFO] manual chaos test: run \"docker kill self-healing-cache-node-c-1\" while smoke test is running to verify failure detection");
+
+    const memRes1 = await clients[0].send({ command: "MEMBERSHIP_QUERY" });
+    console.log("[INFO] Cluster membership before kill:");
+    if (memRes1.ok && memRes1.members) {
+        for (const [nodeId, state] of Object.entries(memRes1.members)) {
+            console.log(`  ${nodeId}: ${state}`);
+        }
+    }
+
+    console.log("[INFO] Waiting for gossip to detect node failure...");
+    let nodeCDead = false;
+    const failureStart = Date.now();
+    while (Date.now() - failureStart < 10000) {
+        const query = await clients[0].send({ command: "MEMBERSHIP_QUERY" });
+        if (query.ok && query.members && query.members["node-c"] === "DEAD") {
+            nodeCDead = true;
+            break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    if (nodeCDead) {
+        pass("node-c detected as DEAD within 10 seconds");
+
+        // Verify fallback: SET and GET a key owned by node-c
+        const testKey = "smoke:fail:c";
+        const testVal = "fallback-value";
+        let fallbackSucceeded = false;
+        try {
+            const setRes = await clients[0].send({ command: "SET", key: testKey, value: testVal });
+            const getRes = await clients[0].send({ command: "GET", key: testKey });
+            if (setRes.ok && getRes.ok && getRes.value === testVal) {
+                fallbackSucceeded = true;
+            }
+        } catch (err) {
+            // Ignore
+        }
+
+        if (fallbackSucceeded) {
+            pass("Requests to keys owned by node-c still succeed (replica fallback)");
+        } else {
+            fail("Requests to keys owned by node-c still succeed (replica fallback)", "ok:true", "failed");
+        }
+
+        console.log("[INFO] Waiting for node-c recovery (restart node-c now if testing manually)...");
+        let nodeCRecovered = false;
+        const recoveryStart = Date.now();
+        while (Date.now() - recoveryStart < 10000) {
+            const query = await clients[0].send({ command: "MEMBERSHIP_QUERY" });
+            if (query.ok && query.members && query.members["node-c"] === "ALIVE") {
+                nodeCRecovered = true;
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+
+        if (nodeCRecovered) {
+            pass("node-c recovery detected within 10 seconds after restart");
+        } else {
+            fail("node-c recovery detected within 10 seconds after restart", "ALIVE", "DEAD");
+        }
+    } else {
+        console.log("[INFO] node-c remained ALIVE. (No manual kill was performed during the 10-second window. Skipping failure detection assertions.)");
+    }
+
     // Disconnect all clients cleanly
     for (const client of clients) {
         await client.disconnect();

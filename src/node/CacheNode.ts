@@ -3,6 +3,7 @@ import { Router } from "./Router.js";
 import { TcpServer } from "./TcpServer.js";
 import { CLUSTER_CONFIG, getNodeInfo } from "../config/cluster.js";
 import type { ClusterConfig } from "../types/index.js";
+import { GossipManager } from "./GossipManager.js";
 
 /**
  * Composes KVStore, Router, and TcpServer into a single startable/stoppable
@@ -29,6 +30,7 @@ export class CacheNode {
     private readonly kvStore: KVStore;
     private readonly router: Router;
     private readonly tcpServer: TcpServer;
+    private readonly gossipManager: GossipManager;
 
     constructor(nodeId: string, config: ClusterConfig) {
         // Look up this node's port from the provided config.
@@ -42,7 +44,17 @@ export class CacheNode {
 
         // Wire together the three internal components.
         this.kvStore = new KVStore();
-        this.router = new Router(nodeId, config, this.kvStore);
+        this.gossipManager = new GossipManager(
+            nodeId,
+            config,
+            (deadNodeId) => {
+                console.log(`[Gossip] ${deadNodeId} confirmed DEAD`);
+            },
+            (aliveNodeId) => {
+                console.log(`[Gossip] ${aliveNodeId} recovered — marking ALIVE`);
+            }
+        );
+        this.router = new Router(nodeId, config, this.kvStore, this.gossipManager);
         this.tcpServer = new TcpServer(this.port, (req) => this.router.route(req));
     }
 
@@ -54,6 +66,7 @@ export class CacheNode {
      */
     async start(): Promise<void> {
         await this.tcpServer.listen();
+        this.gossipManager.start();
         console.log(`[CacheNode] ${this.nodeId} listening on port ${this.port}`);
     }
 
@@ -62,6 +75,7 @@ export class CacheNode {
      * releasing all held resources.
      */
     async stop(): Promise<void> {
+        this.gossipManager.stop();
         await this.router.stop();
         await this.tcpServer.close();
         this.kvStore.stopSweeper();

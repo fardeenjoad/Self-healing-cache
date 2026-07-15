@@ -3,6 +3,7 @@ import { KVStore } from "../core/kvstore.js";
 import { CacheClient } from "../client/CacheClient.js";
 import { ReplicationManager } from "./ReplicationManager.js";
 import type { CacheRequest, CacheResponse, ClusterConfig, NodeInfo } from "../types/index.js";
+import { GossipManager } from "./GossipManager.js";
 
 /**
  * Routes incoming cache requests to the correct node in the cluster using a
@@ -37,11 +38,18 @@ export class Router {
     private readonly config: ClusterConfig;
     private readonly connectedPeers: Set<string> = new Set();
     private readonly repairQueue: ReplicationManager = new ReplicationManager();
+    private readonly gossipManager?: GossipManager;
 
-    constructor(localNodeId: string, config: ClusterConfig, localStore: KVStore) {
+    constructor(
+        localNodeId: string,
+        config: ClusterConfig,
+        localStore: KVStore,
+        gossipManager?: GossipManager
+    ) {
         this.localNodeId = localNodeId;
         this.config = config;
         this.localStore = localStore;
+        this.gossipManager = gossipManager;
 
         // Build the consistent hash ring with all cluster nodes.
         this.ring = new ConsistentHashRing();
@@ -96,7 +104,7 @@ export class Router {
      */
     async route(req: CacheRequest): Promise<CacheResponse> {
         // 1. Validate before any ring lookup.
-        const validCommands = ["GET", "SET", "DEL", "REPLICATE", "REPLICATE_DEL"];
+        const validCommands = ["GET", "SET", "DEL", "REPLICATE", "REPLICATE_DEL", "MEMBERSHIP_QUERY"];
         if (!validCommands.includes(req.command)) {
             return { ok: false, error: "unknown command" };
         }
@@ -107,9 +115,14 @@ export class Router {
             return { ok: false, error: "REPLICATE requires value" };
         }
 
-        // REPLICATE and REPLICATE_DEL bypass ring routing entirely — always local
+        // REPLICATE, REPLICATE_DEL, and MEMBERSHIP_QUERY bypass ring routing entirely — always local
         // GET with isFallback: true also bypasses ring routing to retrieve the value from replica's local store
-        if (req.command === "REPLICATE" || req.command === "REPLICATE_DEL" || req.isFallback) {
+        if (
+            req.command === "REPLICATE" ||
+            req.command === "REPLICATE_DEL" ||
+            req.command === "MEMBERSHIP_QUERY" ||
+            req.isFallback
+        ) {
             return this.executeLocally(req);
         }
 
@@ -179,10 +192,40 @@ export class Router {
                 this.localStore.del(req.key);
                 return { ok: true };
             }
+            case "MEMBERSHIP_QUERY": {
+                const membersRecord: Record<string, string> = {};
+                if (this.gossipManager) {
+                    for (const [nodeId, info] of this.gossipManager.getAllMembers().entries()) {
+                        membersRecord[nodeId] = info.state;
+                    }
+                } else {
+                    for (const node of this.config) {
+                        membersRecord[node.nodeId] = "ALIVE";
+                    }
+                }
+                return {
+                    ok: true,
+                    status: "OK",
+                    members: membersRecord,
+                };
+            }
             default:
                 // Should never reach here after validation in route().
                 return { ok: false, error: "unknown command" };
         }
+    }
+
+    /**
+     * Returns true if the node is reachable (ALIVE or SUSPECT — not DEAD).
+     */
+    public isNodeReachable(nodeId: string): boolean {
+        if (nodeId === this.localNodeId) {
+            return true;
+        }
+        if (!this.gossipManager) {
+            return true;
+        }
+        return this.gossipManager.isAlive(nodeId);
     }
 
     /**
@@ -217,6 +260,55 @@ export class Router {
      *          error response if the forward failed.
      */
     private async forwardToPeer(homeNodeId: string, req: CacheRequest): Promise<CacheResponse> {
+        if (!this.isNodeReachable(homeNodeId)) {
+            // If the target is DEAD, and it's a fallback request or replication command, fail immediately
+            if (req.isFallback || req.command === "REPLICATE" || req.command === "REPLICATE_DEL") {
+                return { ok: false, error: `Node ${homeNodeId} is DEAD` };
+            }
+
+            // Otherwise, immediately try next replica clockwise on the ring
+            const allNodes = this.ring.getNodes(req.key, 3);
+            const replicas = allNodes.slice(1);
+
+            const reachableReplicas = replicas.filter(
+                (nodeId) => nodeId === this.localNodeId || this.isNodeReachable(nodeId)
+            );
+
+            if (reachableReplicas.length === 0) {
+                return {
+                    ok: false,
+                    error: "all replicas unavailable",
+                    status: "ERROR",
+                    message: "all replicas unavailable",
+                };
+            }
+
+            for (const replicaId of reachableReplicas) {
+                let resp: CacheResponse;
+                if (replicaId === this.localNodeId) {
+                    resp = await this.executeLocally({ ...req, isFallback: true });
+                } else {
+                    resp = await this.forwardToPeer(replicaId, { ...req, isFallback: true });
+                }
+
+                if (resp.ok) {
+                    if (req.command !== "GET" || resp.value !== undefined) {
+                        return resp;
+                    }
+                }
+            }
+
+            if (req.command === "GET") {
+                return { ok: true };
+            }
+            return {
+                ok: false,
+                error: "all replicas unavailable",
+                status: "ERROR",
+                message: "all replicas unavailable",
+            };
+        }
+
         const client = this.peers.get(homeNodeId);
         if (!client) {
             return { ok: false, error: `No peer client for node ${homeNodeId}` };
@@ -302,6 +394,10 @@ export class Router {
         value: string,
         expiresAt: number | null
     ): Promise<void> {
+        if (!this.isNodeReachable(targetNodeId)) {
+            console.warn(`[Replication] WARNING: skipping replication of key ${key} to dead node ${targetNodeId}`);
+            return;
+        }
         try {
             const resp = await this.forwardToPeer(targetNodeId, {
                 command: "REPLICATE",
@@ -332,6 +428,10 @@ export class Router {
      * @throws {Error} If the target is unreachable, times out, or returns ok:false.
      */
     public async replicateDelToNode(targetNodeId: string, key: string): Promise<void> {
+        if (!this.isNodeReachable(targetNodeId)) {
+            console.warn(`[Replication] WARNING: skipping replicate delete of key ${key} to dead node ${targetNodeId}`);
+            return;
+        }
         const resp = await this.forwardToPeer(targetNodeId, {
             command: "REPLICATE_DEL",
             key,

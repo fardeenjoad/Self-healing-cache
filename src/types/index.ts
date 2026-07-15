@@ -26,7 +26,7 @@ export type ClusterConfig = NodeInfo[];
 
 /** Wire-format command sent by a client to a cache node (Req 1.3, 1.5). */
 export interface CacheRequest {
-    command: "SET" | "GET" | "DEL" | "REPLICATE" | "REPLICATE_DEL";
+    command: "SET" | "GET" | "DEL" | "REPLICATE" | "REPLICATE_DEL" | "MEMBERSHIP_QUERY";
     key: string;
     value?: string;
     ttl?: number;
@@ -59,4 +59,10 @@ export interface CacheResponse {
     error?: string;
     /** Echoed from CacheRequest.id for concurrent request multiplexing. */
     id?: string;
+    /** Gossip membership states. */
+    members?: Record<string, string>;
+    /** Optional status code or string. */
+    status?: string;
+    /** Optional response message. */
+    message?: string;
 }
